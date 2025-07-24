@@ -25,7 +25,7 @@ func main() {
 		return scanner.Text(), true
 	}
 
-	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition}
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, ReadLinesDefinition}
 	agent := NewAgent(&client, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
@@ -305,6 +305,84 @@ func createNewFile(filePath, content string) (string, error) {
 	}
 
 	return fmt.Sprintf("Successfully created file %s", filePath), nil
+}
+
+var ReadLinesDefinition = ToolDefinition{
+	Name: "read_lines",
+	Description: `Read lines from a file.
+
+	Reads lines from a file starting at line 'start_line' and ending at line 'end_line', with 'start_line' inclusive and 'end_line' exclusive.
+
+	"start_line" and "end_line" are 1-indexed.
+
+	If 'start_line' is greater than 'end_line', return an error.
+
+	If 'start_line' or 'end_line' is greater than the number of lines in the file, return an error.
+
+	If the file doesn't exist, return an error.
+	`,
+	InputSchema: ReadLinesInputSchema,
+	Function:    ReadLines,
+}
+
+type ReadLinesInput struct {
+	Path      string `json:"path" jsonschema_description:"The path to the file"`
+	StartLine int    `json:"start_line" jsonschema_description:"The line to start reading from (1-indexed), inclusive"`
+	EndLine   int    `json:"end_line" jsonschema_description:"The line to stop reading at (1-indexed), exclusive"`
+}
+
+var ReadLinesInputSchema = GenerateSchema[ReadLinesInput]()
+
+func ReadLines(input json.RawMessage) (string, error) {
+	readLinesInput := ReadLinesInput{}
+	err := json.Unmarshal(input, &readLinesInput)
+	if err != nil {
+		return "", err
+	}
+
+	if readLinesInput.StartLine < 1 || readLinesInput.EndLine < readLinesInput.StartLine {
+		return "", fmt.Errorf("invalid line numbers")
+	}
+
+	if readLinesInput.StartLine == readLinesInput.EndLine {
+		return "[]", nil
+	}
+
+	file, err := os.Open(readLinesInput.Path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	lines := []string{}
+	scanner := bufio.NewScanner(file)
+	lineNum := 1
+	for scanner.Scan() {
+		if lineNum >= readLinesInput.StartLine && lineNum < readLinesInput.EndLine {
+			line := fmt.Sprintf("<line-%d>%s</line-%d>", lineNum, scanner.Text(), lineNum)
+			lines = append(lines, line)
+		}
+		lineNum++
+	}
+
+	if lineNum <= readLinesInput.StartLine {
+		return "", fmt.Errorf("start line beyond file length")
+	}
+
+	if lineNum < readLinesInput.EndLine {
+		return "", fmt.Errorf("end line beyond file length")
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	result, err := json.Marshal(lines)
+	if err != nil {
+		return "", err
+	}
+
+	return string(result), nil
 }
 
 func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {

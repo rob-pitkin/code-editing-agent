@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -238,20 +239,68 @@ func ListFiles(input json.RawMessage) (string, error) {
 
 var EditFileDefinition = ToolDefinition{
 	Name: "edit_file",
-	Description: `Make edits to a text file.
-
-Replaces  'old_str' with 'new_str' in the given file. 'old_str' and 'new_str' MUST be different from each other.
-
-If the file specified with the path doesn't exist, it will be created.
+	Description: `A powerful tool for performing precise, line-based edits on a file.
+Use this when you need to modify existing code or text files by replacing,
+inserting, or deleting specific lines, or by replacing substrings within
+a line. It accepts a list of edit operations to apply in a single,
+atomic transaction. This is ideal for surgical changes rather than
+overwriting entire files. All line numbers are 1-based.
+If you need to create a new file, use the "append_to_file" operation as the first operation in the Edits array.
 `,
 	InputSchema: EditFileInputSchema,
 	Function:    EditFile,
 }
 
+type StringOrStringArray []string
+
+func (s *StringOrStringArray) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as a string
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		*s = []string{str}
+		return nil
+	}
+
+	// If not string, try as a string array
+	var strArr []string
+	if err := json.Unmarshal(data, &strArr); err == nil {
+		*s = strArr
+		return nil
+	}
+
+	return fmt.Errorf("invalid input")
+}
+
+func (s StringOrStringArray) MarshalJSON() ([]byte, error) {
+	if len(s) == 1 {
+		return json.Marshal(s[0])
+	}
+	return json.Marshal([]string(s))
+}
+
+type EditOperationType string
+
+const (
+	ReplaceLineOp         EditOperationType = "replace_line"
+	InsertLineBeforeOp    EditOperationType = "insert_line_before"
+	InsertLineAfterOp     EditOperationType = "insert_line_after"
+	DeleteLineOp          EditOperationType = "delete_line"
+	ReplaceStringInLineOp EditOperationType = "replace_string_in_line"
+	AppendToFileOp        EditOperationType = "append_to_file"
+)
+
+type Edit struct {
+	OperationType EditOperationType   `json:"operation_type" jsonschema_description:"The type of edit to perform. There should only be one operation type per edit." jsonschema_enum:"replace_line,insert_line_before,insert_line_after,delete_line,replace_string_in_line,append_to_file"`
+	LineNumber    int                 `json:"line_number,omitempty" jsonschema_description:"The 1-based line number for the operation. Required for line-specific edits." jsonschema_minimum:"1"`
+	NewContent    StringOrStringArray `json:"new_content,omitempty" jsonschema_description:"The content to insert or replace with. If an array with a single string, it's treated as a single line. If an array with multiple strings, each element is a new line. Required for 'replace_line', 'insert_line_before', 'insert_line_after', 'append_to_file'."`
+	OldString     string              `json:"old_string,omitempty" jsonschema_description:"The substring to find and replace. Required for 'replace_string_in_line'."`
+	NewString     string              `json:"new_string,omitempty" jsonschema_description:"The string to replace 'old_string' with. Required for 'replace_string_in_line'."`
+	Count         int                 `json:"count,omitempty" jsonschema_description:"Maximum number of occurrences to replace within the line for 'replace_string_in_line'. Use -1 for all occurrences. Default is 1."`
+}
+
 type EditFileInput struct {
-	Path   string `json:"path" jsonschema_description:"The path to the file"`
-	OldStr string `json:"old_str" jsonschema_description:"Text to search for - must match exactly and must only have one match exactly"`
-	NewStr string `json:"new_str" jsonschema_description:"Text to replace old_str with"`
+	Path  string `json:"path" jsonschema_description:"The path to the file"`
+	Edits []Edit `json:"edits" jsonschema_description:"A list of edit operations to apply to the file."`
 }
 
 var EditFileInputSchema = GenerateSchema[EditFileInput]()
@@ -263,26 +312,77 @@ func EditFile(input json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if editFileInput.Path == "" || editFileInput.OldStr == editFileInput.NewStr {
+	if editFileInput.Path == "" {
 		return "", fmt.Errorf("invalid input parameters")
 	}
 
-	content, err := os.ReadFile(editFileInput.Path)
+	operationCounter := 0
+
+	fileContent, err := ReadFile(json.RawMessage(`{"path": "` + editFileInput.Path + `"}`))
 	if err != nil {
-		if os.IsNotExist(err) && editFileInput.OldStr == "" {
-			return createNewFile(editFileInput.Path, editFileInput.NewStr)
+		if os.IsNotExist(err) && len(editFileInput.Edits) > 0 && editFileInput.Edits[0].OperationType == AppendToFileOp {
+			if len(editFileInput.Edits[0].NewContent) == 0 {
+				return "", fmt.Errorf("no new content provided")
+			}
+			_, err = createNewFile(editFileInput.Path, editFileInput.Edits[0].NewContent[0])
+			if err != nil {
+				return "", err
+			} else {
+				operationCounter++
+			}
+		} else {
+			return "", err
 		}
-		return "", err
 	}
 
-	oldContent := string(content)
-	newContent := strings.Replace(oldContent, editFileInput.OldStr, editFileInput.NewStr, -1)
+	lines := strings.Split(fileContent, "\n")
 
-	if oldContent == newContent && editFileInput.OldStr != "" {
-		return "", fmt.Errorf("old_str not found in file")
+	for operationCounter < len(editFileInput.Edits) {
+		switch editFileInput.Edits[operationCounter].OperationType {
+		case ReplaceLineOp:
+			err = replaceLine(&lines, editFileInput.Edits[operationCounter].LineNumber, editFileInput.Edits[operationCounter].NewContent)
+			if err != nil {
+				return "", err
+			}
+		case InsertLineBeforeOp:
+			err = insertLineBefore(&lines, editFileInput.Edits[operationCounter].LineNumber, editFileInput.Edits[operationCounter].NewContent)
+			if err != nil {
+				return "", err
+			}
+		case InsertLineAfterOp:
+			err = insertLineAfter(&lines, editFileInput.Edits[operationCounter].LineNumber, editFileInput.Edits[operationCounter].NewContent)
+			if err != nil {
+				return "", err
+			}
+		case DeleteLineOp:
+			err = deleteLine(&lines, editFileInput.Edits[operationCounter].LineNumber)
+			if err != nil {
+				return "", err
+			}
+		case ReplaceStringInLineOp:
+			if editFileInput.Edits[operationCounter].Count == 0 {
+				return "", fmt.Errorf("count must be greater than 0")
+			}
+			err = replaceStringInLine(&lines, editFileInput.Edits[operationCounter].LineNumber, editFileInput.Edits[operationCounter].OldString, editFileInput.Edits[operationCounter].NewString, editFileInput.Edits[operationCounter].Count)
+			if err != nil {
+				return "", err
+			}
+		case AppendToFileOp:
+			err = appendToFile(&lines, editFileInput.Edits[operationCounter].NewContent)
+			if err != nil {
+				return "", err
+			}
+		default:
+			return "", fmt.Errorf("invalid operation type: %s", editFileInput.Edits[operationCounter].OperationType)
+		}
+		operationCounter++
 	}
 
-	err = os.WriteFile(editFileInput.Path, []byte(newContent), 0644)
+	// join the lines back into a string
+	linesString := strings.Join(lines, "\n")
+
+	// rewrite the file
+	err = os.WriteFile(editFileInput.Path, []byte(linesString), 0644)
 	if err != nil {
 		return "", err
 	}
@@ -305,6 +405,109 @@ func createNewFile(filePath, content string) (string, error) {
 	}
 
 	return fmt.Sprintf("Successfully created file %s", filePath), nil
+}
+
+// replaceLine replaces a line in the content with the new content
+// newContent is a string or an array of strings
+// if newContent is a string, it's treated as a single line
+// if newContent is an array of strings, each element is a new line
+func replaceLine(content *[]string, lineNumber int, newContent StringOrStringArray) error {
+	if lineNumber < 1 || lineNumber > len(*content) {
+		return fmt.Errorf("line number out of bounds")
+	}
+	index := lineNumber - 1
+
+	result := make([]string, len(*content)+len(newContent)-1)
+	// copy the content before the line number
+	copy(result, (*content)[:index])
+	// copy the new content over, replacing the line specified
+	copy(result[index:], newContent)
+	// copy the content after the line number
+	copy(result[index+len(newContent):], (*content)[index+1:])
+	*content = result
+	return nil
+}
+
+// insertLineBefore inserts a line or lines before the specified line number, not replacing the line specified
+// newContent is a string or an array of strings
+// if newContent is a string, it's treated as a single line
+// if newContent is an array of strings, each element is a new line
+func insertLineBefore(content *[]string, lineNumber int, newContent StringOrStringArray) error {
+	if lineNumber < 1 || lineNumber > len(*content) {
+		return fmt.Errorf("line number out of bounds")
+	}
+
+	result := make([]string, len(*content)+len(newContent))
+
+	// find the line number to start inserting at
+	insertLine := max(lineNumber-len(newContent), 0)
+	// copy the content up through the insert line
+	copy(result, (*content)[:insertLine])
+	// copy the new content over, inserting before the line specified
+	copy(result[insertLine:], newContent)
+	// copy the content after the insert line
+	copy(result[insertLine+len(newContent):], (*content)[insertLine:])
+	*content = result
+	return nil
+}
+
+// insertLineAfter inserts a line or lines after the specified line number, not replacing the line specified
+// newContent is a string or an array of strings
+// if newContent is a string, it's treated as a single line
+// if newContent is an array of strings, each element is a new line
+func insertLineAfter(content *[]string, lineNumber int, newContent StringOrStringArray) error {
+	if lineNumber < 1 || lineNumber > len(*content) {
+		return fmt.Errorf("line number out of bounds")
+	}
+	result := make([]string, len(*content)+len(newContent))
+
+	// copy the content up through the line number
+	copy(result, (*content)[:lineNumber])
+	// copy the new content over, inserting after the line specified
+	copy(result[lineNumber:], newContent)
+	// copy the content after the line number
+	copy(result[lineNumber+len(newContent):], (*content)[lineNumber:])
+	*content = result
+	return nil
+}
+
+// deleteLine deletes a line from the content
+// lineNumber is the 1-based line number to delete
+func deleteLine(content *[]string, lineNumber int) error {
+	if lineNumber < 1 || lineNumber > len(*content) {
+		return fmt.Errorf("line number out of bounds")
+	}
+
+	lines := *content
+	lines = slices.Delete(lines, lineNumber-1, lineNumber)
+	*content = lines
+	return nil
+}
+
+// replaceStringInLine replaces a string in a line with a new string
+// lineNumber is the 1-based line number to replace the string in
+// oldString is the string to replace
+// newString is the string to replace oldString with
+// count is the maximum number of occurrences to replace, defaults to 1, -1 for all occurrences
+func replaceStringInLine(content *[]string, lineNumber int, oldString, newString string, count int) error {
+	if lineNumber < 1 || lineNumber > len(*content) {
+		return fmt.Errorf("line number out of bounds")
+	}
+
+	lines := *content
+	newLine := strings.Replace(lines[lineNumber-1], oldString, newString, count)
+	lines[lineNumber-1] = newLine
+	*content = lines
+	return nil
+}
+
+// appendToFile appends content to the end of the file
+// content is a string or an array of strings
+// if content is a string, it's treated as a single line
+// if content is an array of strings, each element is a new line
+func appendToFile(content *[]string, newContent StringOrStringArray) error {
+	*content = append(*content, newContent...)
+	return nil
 }
 
 var ReadLinesDefinition = ToolDefinition{

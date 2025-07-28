@@ -26,7 +26,7 @@ func main() {
 		return scanner.Text(), true
 	}
 
-	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, ReadLinesDefinition}
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, ReadLinesDefinition, GetFileLengthDefinition}
 	agent := NewAgent(&client, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
@@ -175,8 +175,13 @@ func ReadFile(input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// add line numbers to each line
+	lines := strings.Split(string(content), "\n")
+	for i, line := range lines {
+		lines[i] = fmt.Sprintf("<line-%d> %s </line-%d>", i+1, line, i+1)
+	}
 
-	return string(content), nil
+	return strings.Join(lines, "\n"), nil
 }
 
 var ListFilesDefinition = ToolDefinition{
@@ -239,14 +244,16 @@ func ListFiles(input json.RawMessage) (string, error) {
 
 var EditFileDefinition = ToolDefinition{
 	Name: "edit_file",
-	Description: `A powerful tool for performing precise, line-based edits on a file.
-Use this when you need to modify existing code or text files by replacing,
-inserting, or deleting specific lines, or by replacing substrings within
-a line. It accepts a list of edit operations to apply in a single,
-atomic transaction. This is ideal for surgical changes rather than
-overwriting entire files. All line numbers are 1-based.
-If you need to create a new file, use the "append_to_file" operation as the first operation in the Edits array.
-`,
+	Description: `Edit a file by applying a list of operations. Operations include:
+- replace_line: Replace a specific line
+- insert_line_before: Insert new lines before a specific line
+- insert_line_after: Insert new lines after a specific line
+- delete_line: Delete a specific line
+- replace_string_in_line: Replace text within a specific line
+- append_to_file: Add lines to the end of the file
+
+All line numbers are 1-based. You must provide at least one edit operation.
+To create a new file, use append_to_file as the first operation.`,
 	InputSchema: EditFileInputSchema,
 	Function:    EditFile,
 }
@@ -291,16 +298,16 @@ const (
 
 type Edit struct {
 	OperationType EditOperationType   `json:"operation_type" jsonschema_description:"The type of edit to perform. There should only be one operation type per edit." jsonschema_enum:"replace_line,insert_line_before,insert_line_after,delete_line,replace_string_in_line,append_to_file"`
-	LineNumber    int                 `json:"line_number,omitempty" jsonschema_description:"The 1-based line number for the operation. Required for line-specific edits." jsonschema_minimum:"1"`
+	LineNumber    int                 `json:"line_number,omitzero" jsonschema_description:"The 1-based line number for the operation. Required for line-specific edits." jsonschema_minimum:"1"`
 	NewContent    StringOrStringArray `json:"new_content,omitempty" jsonschema_description:"The content to insert or replace with. If an array with a single string, it's treated as a single line. If an array with multiple strings, each element is a new line. Required for 'replace_line', 'insert_line_before', 'insert_line_after', 'append_to_file'."`
 	OldString     string              `json:"old_string,omitempty" jsonschema_description:"The substring to find and replace. Required for 'replace_string_in_line'."`
 	NewString     string              `json:"new_string,omitempty" jsonschema_description:"The string to replace 'old_string' with. Required for 'replace_string_in_line'."`
-	Count         int                 `json:"count,omitempty" jsonschema_description:"Maximum number of occurrences to replace within the line for 'replace_string_in_line'. Use -1 for all occurrences. Default is 1."`
+	Count         int                 `json:"count,omitzero" jsonschema_description:"Maximum number of occurrences to replace within the line for 'replace_string_in_line'. Use -1 for all occurrences. Default is 1."`
 }
 
 type EditFileInput struct {
 	Path  string `json:"path" jsonschema_description:"The path to the file"`
-	Edits []Edit `json:"edits" jsonschema_description:"A list of edit operations to apply to the file."`
+	Edits []Edit `json:"edits" jsonschema_description:"An array of edit operations to apply to the file. Must contain at least one operation." jsonschema_minItems:"1"`
 }
 
 var EditFileInputSchema = GenerateSchema[EditFileInput]()
@@ -309,16 +316,23 @@ func EditFile(input json.RawMessage) (string, error) {
 	editFileInput := EditFileInput{}
 	err := json.Unmarshal(input, &editFileInput)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to unmarshal edit file input: %w (raw input: %s)", err, string(input))
 	}
 
 	if editFileInput.Path == "" {
 		return "", fmt.Errorf("invalid input parameters")
 	}
 
+	if len(editFileInput.Edits) == 0 {
+		return "", fmt.Errorf("edits array is required and must contain at least one edit operation")
+	}
+
 	operationCounter := 0
 
-	fileContent, err := ReadFile(json.RawMessage(`{"path": "` + editFileInput.Path + `"}`))
+	var lines []string
+
+	// Read file directly without line numbers for editing
+	content, err := os.ReadFile(editFileInput.Path)
 	if err != nil {
 		if os.IsNotExist(err) && len(editFileInput.Edits) > 0 && editFileInput.Edits[0].OperationType == AppendToFileOp {
 			if len(editFileInput.Edits[0].NewContent) == 0 {
@@ -330,12 +344,17 @@ func EditFile(input json.RawMessage) (string, error) {
 			} else {
 				operationCounter++
 			}
+			// Re-read the file after creating it
+			content, err = os.ReadFile(editFileInput.Path)
+			if err != nil {
+				return "", err
+			}
 		} else {
 			return "", err
 		}
 	}
 
-	lines := strings.Split(fileContent, "\n")
+	lines = strings.Split(string(content), "\n")
 
 	for operationCounter < len(editFileInput.Edits) {
 		switch editFileInput.Edits[operationCounter].OperationType {
@@ -588,6 +607,42 @@ func ReadLines(input json.RawMessage) (string, error) {
 	return string(result), nil
 }
 
+var GetFileLengthDefinition = ToolDefinition{
+	Name: "get_file_length",
+	Description: `Get the number of lines in a file.
+
+	Returns the number of lines in a file.
+	`,
+	InputSchema: GetFileLengthInputSchema,
+	Function:    GetFileLength,
+}
+
+type GetFileLengthInput struct {
+	Path string `json:"path" jsonschema_description:"The path to the file"`
+}
+
+var GetFileLengthInputSchema = GenerateSchema[GetFileLengthInput]()
+
+func GetFileLength(input json.RawMessage) (string, error) {
+	getFileLengthInput := GetFileLengthInput{}
+	err := json.Unmarshal(input, &getFileLengthInput)
+	if err != nil {
+		return "", err
+	}
+
+	if getFileLengthInput.Path == "" {
+		return "", fmt.Errorf("invalid input parameters")
+	}
+
+	fileContent, err := ReadFile(json.RawMessage(`{"path": "` + getFileLengthInput.Path + `"}`))
+	if err != nil {
+		return "", err
+	}
+
+	lines := strings.Split(fileContent, "\n")
+	return fmt.Sprintf("%d", len(lines)), nil
+}
+
 func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: false,
@@ -599,5 +654,6 @@ func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
 
 	return anthropic.ToolInputSchemaParam{
 		Properties: schema.Properties,
+		Required:   schema.Required,
 	}
 }

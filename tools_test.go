@@ -111,6 +111,46 @@ func resetTestFile() {
 	os.WriteFile("test_edit.txt", []byte("test line one\ntest line two\ntest line three\ntest line four\ntest line five"), 0644)
 }
 
+func TestEditFileEdgeCases(t *testing.T) {
+	// Test what happens when edits is missing
+	missingEdits := json.RawMessage(`{"path": "test.txt"}`)
+	_, err := EditFile(missingEdits)
+	if err == nil {
+		t.Fatal("Expected error for missing edits field")
+	}
+	t.Logf("Missing edits error: %v", err)
+
+	// Test what happens when edits is empty
+	emptyEdits := json.RawMessage(`{"path": "test.txt", "edits": []}`)
+	_, err = EditFile(emptyEdits)
+	if err == nil {
+		t.Fatal("Expected error for empty edits array")
+	}
+	t.Logf("Empty edits error: %v", err)
+
+	// Test malformed JSON
+	badJson := json.RawMessage(`{"path": "test.txt", "edits": `)
+	_, err = EditFile(badJson)
+	if err == nil {
+		t.Fatal("Expected error for malformed JSON")
+	}
+	t.Logf("Malformed JSON error: %v", err)
+
+	// Test edit with missing required fields
+	os.WriteFile("test_temp.txt", []byte("line 1\nline 2\n"), 0644)
+	defer os.Remove("test_temp.txt")
+
+	missingLineNumber := json.RawMessage(`{
+		"path": "test_temp.txt",
+		"edits": [{"operation_type": "replace_line", "new_content": ["new line"]}]
+	}`)
+	_, err = EditFile(missingLineNumber)
+	if err == nil {
+		t.Fatal("Expected error for missing line_number")
+	}
+	t.Logf("Missing line_number error: %v", err)
+}
+
 func TestEditFile(t *testing.T) {
 	defer func() {
 		os.Remove("test_edit.txt")
@@ -136,10 +176,12 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err := ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	// Read file directly for comparison
+	content, err := os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult := string(content)
 	if readFileResult != expectedReplaceLineResult {
 		t.Fatalf("expected %v, got %v", expectedReplaceLineResult, readFileResult)
 	}
@@ -164,10 +206,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedInsertLineBeforeResult {
 		t.Fatalf("expected %v, got %v", expectedInsertLineBeforeResult, readFileResult)
 	}
@@ -192,10 +235,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedInsertLineAfterResult {
 		t.Fatalf("expected %v, got %v", expectedInsertLineAfterResult, readFileResult)
 	}
@@ -218,10 +262,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedDeleteLineResult {
 		t.Fatalf("expected %v, got %v", expectedDeleteLineResult, readFileResult)
 	}
@@ -247,10 +292,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedReplaceStringInLineResult {
 		t.Fatalf("expected %v, got %v", expectedReplaceStringInLineResult, readFileResult)
 	}
@@ -274,10 +320,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedAppendToFileResult {
 		t.Fatalf("expected %v, got %v", expectedAppendToFileResult, readFileResult)
 	}
@@ -326,10 +373,11 @@ func TestEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to edit file: %v", err)
 	}
-	readFileResult, err = ReadFile(json.RawMessage(`{"path": "test_edit.txt"}`))
+	content, err = os.ReadFile("test_edit.txt")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
+	readFileResult = string(content)
 	if readFileResult != expectedMultipleEditsResult {
 		t.Fatalf("expected %v, got %v", expectedMultipleEditsResult, readFileResult)
 	}
@@ -373,5 +421,59 @@ func TestEditFile(t *testing.T) {
 	_, err = EditFile(editFileInvalidLineNumberInput)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
+	}
+
+	// Test empty edits array
+	editFileEmptyEditsInput := json.RawMessage(`{
+		"path": "test_edit.txt",
+		"edits": []
+	}`)
+	_, err = EditFile(editFileEmptyEditsInput)
+	if err == nil {
+		t.Fatalf("expected error for empty edits array, got nil")
+	}
+
+	// Test missing edits field
+	editFileMissingEditsInput := json.RawMessage(`{
+		"path": "test_edit.txt"
+	}`)
+	_, err = EditFile(editFileMissingEditsInput)
+	if err == nil {
+		t.Fatalf("expected error for missing edits field, got nil")
+	}
+}
+
+func TestReplaceLineMultipleLines(t *testing.T) {
+	// Create a test file
+	os.WriteFile("test_multiline.txt", []byte("line 1\nline 2\nline 3\n"), 0644)
+	defer os.Remove("test_multiline.txt")
+
+	// Test replace_line with multiple lines in new_content
+	editFileReplaceMultipleLines := json.RawMessage(`{
+		"path": "test_multiline.txt",
+		"edits": [
+			{
+				"operation_type": "replace_line",
+				"line_number": 2,
+				"new_content": ["replaced line 1", "replaced line 2", "replaced line 3"]
+			}
+		]
+	}`)
+
+	expectedResult := "line 1\nreplaced line 1\nreplaced line 2\nreplaced line 3\nline 3\n"
+
+	_, err := EditFile(editFileReplaceMultipleLines)
+	if err != nil {
+		t.Fatalf("failed to edit file with multiple line replacement: %v", err)
+	}
+
+	// Read file directly for comparison
+	content, err := os.ReadFile("test_multiline.txt")
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	readFileResult := string(content)
+	if readFileResult != expectedResult {
+		t.Fatalf("expected %q, got %q", expectedResult, readFileResult)
 	}
 }

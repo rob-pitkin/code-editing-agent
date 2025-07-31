@@ -207,3 +207,74 @@ func TestEditFile(t *testing.T) {
 		t.Fatalf("expected error, got nil")
 	}
 }
+
+func TestDeleteLines(t *testing.T) {
+	// create a test file for deleting lines
+	os.WriteFile("test_delete.txt", []byte("test1\ntest2\ntest3\ntest4\ntest5"), 0644)
+	defer os.Remove("test_delete.txt")
+
+	// happy path
+	deleteLinesInput := json.RawMessage(`{
+		"path": "test_delete.txt",
+		"start_line": 1,
+		"end_line": 3
+	}`)
+	result, err := DeleteLines(deleteLinesInput)
+	if err != nil {
+		t.Fatalf("failed to delete lines: %v", err)
+	}
+	if result != "OK" {
+		t.Fatalf("expected OK, got %s", result)
+	}
+	fileContent, err := os.ReadFile("test_delete.txt")
+	if err != nil {
+		t.Fatalf("failed to read file: %v", err)
+	}
+	if string(fileContent) != "test4\ntest5" {
+		t.Fatalf("expected test4\ntest5, got %s", string(fileContent))
+	}
+
+	// test out of bounds
+	deleteLinesInput = json.RawMessage(`{
+		"path": "test_delete.txt",
+		"start_line": 1,
+		"end_line": 6
+	}`)
+	_, err = DeleteLines(deleteLinesInput)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	// test invalid line numbers
+	deleteLinesInput = json.RawMessage(`{
+		"path": "test_delete.txt",
+		"start_line": 0,
+		"end_line": 1
+	}`)
+	_, err = DeleteLines(deleteLinesInput)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	// test invalid file path
+	deleteLinesInput = json.RawMessage(`{
+		"path": "",
+		"start_line": 1,
+		"end_line": 2
+	}`)
+	_, err = DeleteLines(deleteLinesInput)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	// test start line is greater than end line
+	deleteLinesInput = json.RawMessage(`{
+		"path": "test_delete.txt",
+		"start_line": 3,
+		"end_line": 2
+	}`)
+	_, err = DeleteLines(deleteLinesInput)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+}

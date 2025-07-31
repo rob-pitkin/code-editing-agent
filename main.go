@@ -25,7 +25,7 @@ func main() {
 		return scanner.Text(), true
 	}
 
-	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, ReadLinesDefinition, GetFileLengthDefinition}
+	tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition, ReadLinesDefinition, GetFileLengthDefinition, DeleteLinesDefinition}
 	agent := NewAgent(&client, getUserMessage, tools)
 	err := agent.Run(context.TODO())
 	if err != nil {
@@ -426,6 +426,63 @@ func GetFileLength(input json.RawMessage) (string, error) {
 
 	lines := strings.Split(fileContent, "\n")
 	return fmt.Sprintf("%d", len(lines)), nil
+}
+
+var DeleteLinesDefinition = ToolDefinition{
+	Name: "delete_lines",
+	Description: `Delete lines from a file.
+
+	Deletes lines from a file starting at line 'start_line' and ending at line 'end_line', with 'start_line' and 'end_line' inclusive.
+
+	This tool is useful for removing multiple lines at once instead of using the 'edit_file' tool.
+	`,
+	InputSchema: DeleteLinesInputSchema,
+	Function:    DeleteLines,
+}
+
+type DeleteLinesInput struct {
+	Path      string `json:"path" jsonschema_description:"The path to the file to delete lines from"`
+	StartLine int    `json:"start_line" jsonschema_description:"The line to start deleting from (1-indexed), inclusive"`
+	EndLine   int    `json:"end_line" jsonschema_description:"The line to stop deleting at (1-indexed), inclusive"`
+}
+
+var DeleteLinesInputSchema = GenerateSchema[DeleteLinesInput]()
+
+func DeleteLines(input json.RawMessage) (string, error) {
+	deleteLinesInput := DeleteLinesInput{}
+	err := json.Unmarshal(input, &deleteLinesInput)
+	if err != nil {
+		return "", err
+	}
+
+	if deleteLinesInput.Path == "" {
+		return "", fmt.Errorf("invalid file path")
+	}
+
+	// get the length of the file
+	fileContent, err := os.ReadFile(deleteLinesInput.Path)
+	if err != nil {
+		return "", err
+	}
+	fileContentStr := string(fileContent)
+
+	fileLength := len(strings.Split(fileContentStr, "\n"))
+
+	if deleteLinesInput.StartLine < 1 || deleteLinesInput.EndLine < deleteLinesInput.StartLine || deleteLinesInput.EndLine > fileLength {
+		return "", fmt.Errorf("invalid line numbers")
+	}
+
+	lines := strings.Split(fileContentStr, "\n")
+	lines = append(lines[:deleteLinesInput.StartLine-1], lines[deleteLinesInput.EndLine:]...)
+
+	newContent := strings.Join(lines, "\n")
+
+	err = os.WriteFile(deleteLinesInput.Path, []byte(newContent), 0644)
+	if err != nil {
+		return "", err
+	}
+
+	return "OK", nil
 }
 
 func GenerateSchema[T any]() anthropic.ToolInputSchemaParam {
